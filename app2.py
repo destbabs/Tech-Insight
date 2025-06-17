@@ -195,7 +195,7 @@ def render_academic_papers_tab():
     # Cache control
     col1, col2 = st.columns([3, 1])
     with col2:
-        if st.button("🗑️ Clear Cache", help="Clear cached results to get fresh papers"):
+        if st.button("Refresh", help="Clear cached results to get fresh papers"):
             st.cache_data.clear()
             st.success("Cache cleared! Search again for fresh results.")
             st.rerun()
