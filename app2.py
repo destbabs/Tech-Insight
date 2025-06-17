@@ -7,23 +7,54 @@ import arxiv
 from bs4 import BeautifulSoup
 from summarizer import summarize_text
 from components.bookmarks import save_bookmark
+import re
 
 # Cache the arXiv search results
 @st.cache_data(ttl=3600)  # Cache for 1 hour
-def search_arxiv(query, max_results=10):
-    """Search arXiv with retry logic."""
+def search_arxiv(query, max_results=10, search_type="all"):
+    """Search arXiv with improved query construction and retry logic."""
     max_retries = 3
     retry_delay = 2  # seconds
     
     for attempt in range(max_retries):
         try:
+            # Clean and format the query
+            query = query.strip()
+            
+            # Construct different search queries based on search type
+            if search_type == "title":
+                search_query = f'ti:"{query}"'
+            elif search_type == "abstract":
+                search_query = f'abs:"{query}"'
+            elif search_type == "author":
+                search_query = f'au:"{query}"'
+            elif search_type == "category":
+                # Map common terms to arXiv categories
+                category_map = {
+                    "ai": "cs.AI", "artificial intelligence": "cs.AI",
+                    "machine learning": "cs.LG", "ml": "cs.LG",
+                    "computer vision": "cs.CV", "cv": "cs.CV",
+                    "nlp": "cs.CL", "natural language": "cs.CL",
+                    "robotics": "cs.RO", "robots": "cs.RO",
+                    "data science": "cs.LG", "deep learning": "cs.LG",
+                    "neural networks": "cs.LG", "reinforcement learning": "cs.LG"
+                }
+                query_lower = query.lower()
+                if query_lower in category_map:
+                    search_query = f'cat:{category_map[query_lower]}'
+                else:
+                    search_query = f'cat:{query}'
+            else:  # "all" - search in title, abstract, and keywords
+                # Use OR to search in multiple fields for better relevance
+                search_query = f'ti:"{query}" OR abs:"{query}" OR all:"{query}"'
+            
             # Construct the API URL
             base_url = 'http://export.arxiv.org/api/query'
             params = {
-                'search_query': f'all:{query}',
+                'search_query': search_query,
                 'start': 0,
                 'max_results': max_results,
-                'sortBy': 'submittedDate',
+                'sortBy': 'relevance',  # Changed from submittedDate to relevance
                 'sortOrder': 'descending'
             }
             
@@ -44,6 +75,29 @@ def search_arxiv(query, max_results=10):
                 retry_delay *= 2  # Exponential backoff
             else:
                 return None
+
+def calculate_relevance_score(paper, query):
+    """Calculate relevance score based on query terms in title and abstract."""
+    query_terms = query.lower().split()
+    title_lower = paper['title'].lower()
+    summary_lower = paper['summary'].lower()
+    
+    score = 0
+    
+    for term in query_terms:
+        # Higher weight for title matches
+        if term in title_lower:
+            score += 3
+        # Medium weight for abstract matches
+        if term in summary_lower:
+            score += 1
+        # Bonus for exact phrase matches
+        if query.lower() in title_lower:
+            score += 5
+        if query.lower() in summary_lower:
+            score += 2
+    
+    return score
 
 # Cache the arXiv papers fetching
 @st.cache_data(ttl=3600)  # Cache for 1 hour
@@ -98,25 +152,39 @@ def fetch_arxiv_papers(max_results=10, days_back=7):
                 return []
 
 def save_bookmark(paper, item_type="academic_paper"):
-    # Initialize bookmarks if not exists
-    if 'bookmarks' not in st.session_state:
-        st.session_state.bookmarks = []
+    """Save a paper to bookmarks with optimized performance."""
+    try:
+        # Initialize bookmarks if not exists
+        if 'bookmarks' not in st.session_state:
+            st.session_state.bookmarks = []
         
-    # Create a minimal bookmark first
-    bookmark = {
-        "type": item_type,
-        "title": paper['title'],
-        "url": paper['link'],
-        "pdf_link": paper.get('pdf_link'),
-        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "category": "Academic Paper",
-        "authors": paper['authors'],
-        "paper_id": paper['link'].split('/')[-1]  # Store paper ID for later content fetching
-    }
-    
-    # Add to bookmarks immediately
-    st.session_state.bookmarks.append(bookmark)
-    st.success("Paper bookmarked successfully!")
+        # Check if bookmark already exists to prevent duplicates
+        for existing in st.session_state.bookmarks:
+            if existing.get('url') == paper.get('link'):
+                st.warning("This paper is already bookmarked!")
+                return False
+        
+        # Create bookmark with all necessary data
+        bookmark = {
+            "type": item_type,
+            "title": paper['title'],
+            "content": paper.get('summary', ''),  # Include abstract as content
+            "url": paper['link'],
+            "pdf_link": paper.get('pdf_link'),
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "category": "Academic Paper",
+            "authors": paper['authors'],
+            "paper_id": paper['link'].split('/')[-1]  # Store paper ID for later content fetching
+        }
+        
+        # Add to bookmarks immediately
+        st.session_state.bookmarks.append(bookmark)
+        st.success("Paper bookmarked successfully!")
+        return True
+        
+    except Exception as e:
+        st.error(f"Error saving bookmark: {str(e)}")
+        return False
 
 def render_academic_papers_tab():
     # App title and description
@@ -124,12 +192,54 @@ def render_academic_papers_tab():
     st.markdown("### Search for academic papers from arXiv by entering a topic or keyword")
     st.markdown("---")
 
-    # Search input
-    search_query = st.text_input("Enter a topic or keyword:", placeholder="e.g artificial intelligence")
+    # Cache control
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        if st.button("🗑️ Clear Cache", help="Clear cached results to get fresh papers"):
+            st.cache_data.clear()
+            st.success("Cache cleared! Search again for fresh results.")
+            st.rerun()
 
+    # Search configuration
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        search_query = st.text_input("Enter a topic or keyword:", placeholder="e.g artificial intelligence")
+    
+    with col2:
+        search_type = st.selectbox(
+            "Search in:",
+            ["all", "title", "abstract", "author", "category"],
+            help="Choose where to search for your query"
+        )
+    
+    with col3:
+        max_results = st.selectbox(
+            "Max results:",
+            [5, 10, 15, 20],
+            index=1,
+            help="Maximum number of papers to return"
+        )
+        # Search tips
+    with st.expander("💡 Search Tips", expanded=False):
+        st.markdown("""
+        **For better results:**
+        - Use specific keywords (e.g., "transformer" instead of "AI")
+        - Try searching in "title" for exact matches
+        - Use "category" search for broad topics like "machine learning" or "computer vision"
+        - Combine multiple terms with quotes: "deep learning" "computer vision"
+        - Use author names in "author" search mode
+        
+        **Common categories:**
+        - cs.AI: Artificial Intelligence
+        - cs.LG: Machine Learning
+        - cs.CV: Computer Vision
+        - cs.CL: Natural Language Processing
+        - cs.RO: Robotics
+        """)
     # Search button
-    search_button = st.button("🔍 Search Papers")
-
+    search_button = st.button("🔍 Search Papers", use_container_width=True)
+    
     # Function to parse XML response from arXiv
     def parse_arxiv_response(xml_response):
         if xml_response is None:
@@ -165,46 +275,71 @@ def render_academic_papers_tab():
             return results
             
         except Exception as e:
+            st.error(f"Error parsing arXiv response: {str(e)}")
             return []
 
     # Search and display results when button is clicked
     if search_button and search_query:
         with st.spinner("Searching for papers..."):
-            # Fetch papers from arXiv
-            xml_response = search_arxiv(search_query)
-            papers = parse_arxiv_response(xml_response)
-            
-            # Display results
-            if papers:
-                st.success(f"Found {len(papers)} papers related to '{search_query}'")
-                st.markdown("---")
+            try:
+                # Fetch papers from arXiv
+                xml_response = search_arxiv(search_query, max_results, search_type)
                 
-                # Display each paper in a clean layout
-                for i, paper in enumerate(papers):
-                    with st.expander(f"📄 {paper['title']}"):
-                        # Authors
-                        st.markdown(f"**🧑‍🔬 Authors:** {', '.join(paper['authors'])}")
-                        
-                        # Abstract
-                        st.markdown("**📝 Abstract:**")
-                        st.markdown(paper['summary'])
-                        
-                        # Links and Bookmark
-                        col1, col2, col3 = st.columns([0.4, 0.4, 0.2])
-                        with col1:
-                            st.markdown(f"[🔗 View on arXiv]({paper['link']})")
-                        with col2:
-                            if paper['pdf_link']:
-                                st.markdown(f"[📑 Download PDF]({paper['pdf_link']})")
-                        with col3:
-                            if st.button("🔖 Bookmark", key=f"bookmark_{i}"):
-                                save_bookmark(paper)
+                if xml_response is None:
+                    st.error("Failed to fetch papers from arXiv. Please try again later.")
+                    return
+                
+                papers = parse_arxiv_response(xml_response)
+                
+                # Calculate relevance scores and sort results
+                if papers:
+                    for paper in papers:
+                        paper['relevance_score'] = calculate_relevance_score(paper, search_query)
                     
-                    # Add a separator between papers
-                    if i < len(papers) - 1:
+                    # Sort by relevance score (highest first)
+                    papers.sort(key=lambda x: x['relevance_score'], reverse=True)
+                    
+                    # Filter out papers with very low relevance (score < 1)
+                    relevant_papers = [p for p in papers if p['relevance_score'] >= 1]
+                    
+                    if relevant_papers:
+                        st.success(f"Found {len(relevant_papers)} relevant papers for '{search_query}'")
                         st.markdown("---")
-            else:
-                st.warning(f"No papers found for '{search_query}'. Try a different search term.")
+                        
+                        # Display each paper in a clean layout
+                        for i, paper in enumerate(relevant_papers):
+                            with st.expander(f"📄 {paper['title']} (Relevance: {paper['relevance_score']})"):
+                                # Authors
+                                st.markdown(f"**🧑‍🔬 Authors:** {', '.join(paper['authors'])}")
+                                
+                                # Abstract
+                                st.markdown("**📝 Abstract:**")
+                                st.markdown(paper['summary'])
+                                
+                                # Links and Bookmark
+                                col1, col2, col3 = st.columns([0.4, 0.4, 0.2])
+                                with col1:
+                                    st.markdown(f"[🔗 View on arXiv]({paper['link']})")
+                                with col2:
+                                    if paper['pdf_link']:
+                                        st.markdown(f"[📑 Download PDF]({paper['pdf_link']})")
+                                with col3:
+                                    if st.button("🔖 Bookmark", key=f"bookmark_{i}"):
+                                        save_bookmark(paper)
+                            
+                            # Add a separator between papers
+                            if i < len(relevant_papers) - 1:
+                                st.markdown("---")
+                    else:
+                        st.warning(f"No relevant papers found for '{search_query}'. Try a different search term or search type.")
+                else:
+                    st.warning(f"No papers found for '{search_query}'. Try a different search term.")
+                    
+            except Exception as e:
+                st.error(f"An error occurred while searching: {str(e)}")
+                st.info("Try clearing the cache and searching again.")
+
+
 
     # Footer
     st.markdown("---")
