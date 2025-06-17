@@ -3,13 +3,13 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
 import os
 
-load_dotenv()
+GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
 
 @st.cache_data(ttl=86400)  # Cache for 24 hours since summaries don't change
 def summarize_text(text):
     """Summarize text using Google's Gemini model."""
     try:
-        model = ChatGoogleGenerativeAI(model="gemini-2.0-flash")
+        model = ChatGoogleGenerativeAI(model="gemini-2.0-flash",google_api_key=GOOGLE_API_KEY)
         
         prompt = f"""
         Summarize the following text in 3-5 sentences. Keep it professional and informative.
